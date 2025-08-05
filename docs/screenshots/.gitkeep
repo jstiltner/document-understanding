@@ -1,0 +1,20 @@
+# Screenshots Directory
+
+This directory contains UI screenshots for documentation purposes.
+
+## Required Screenshots:
+- dashboard-overview.png - Main dashboard with metrics cards
+- document-upload.png - File upload interface
+- document-list.png - Document management table
+- document-review.png - Human review interface
+- api-documentation.png - Swagger UI interface
+- monitoring-dashboard.png - System monitoring view
+- batch-processing.png - Batch upload interface
+- field-configuration.png - Field definition management
+
+## Guidelines:
+- Use PNG format for screenshots
+- Recommended resolution: 1920x1080 or higher
+- Include browser chrome for context
+- Use sample data that doesn't contain real PHI
+- Capture both light and dark themes if applicable

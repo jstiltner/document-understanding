@@ -35,19 +35,29 @@ class HIPAAAuditLog(Base):
 class HIPAASecurityMiddleware:
     """HIPAA-compliant security middleware"""
     
-    def __init__(self):
+    def __init__(self, app):
+        self.app = app
         self.hipaa_mode = os.getenv("HIPAA_COMPLIANCE_MODE", "false").lower() == "true"
         self.session_timeout = int(os.getenv("SESSION_TIMEOUT_MINUTES", "15"))
         self.max_failed_attempts = int(os.getenv("FAILED_LOGIN_LOCKOUT_ATTEMPTS", "3"))
         self.require_mfa = os.getenv("REQUIRE_MFA", "false").lower() == "true"
         
-    async def __call__(self, request: Request, call_next):
+    async def __call__(self, scope, receive, send):
         """Main middleware function"""
-        start_time = datetime.utcnow()
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+            
+        # Create request object from scope
+        from starlette.requests import Request
+        from starlette.responses import Response
+        
+        request = Request(scope, receive)
         
         # Skip HIPAA checks for health endpoints and static files
         if self._is_exempt_path(request.url.path):
-            return await call_next(request)
+            await self.app(scope, receive, send)
+            return
         
         # Extract client information
         client_ip = self._get_client_ip(request)
@@ -60,8 +70,30 @@ class HIPAASecurityMiddleware:
             # Check access permissions
             await self._check_access_permissions(request, user_id)
             
+            # Create response capture
+            response_started = False
+            status_code = 200
+            
+            async def send_wrapper(message):
+                nonlocal response_started, status_code
+                if message["type"] == "http.response.start":
+                    response_started = True
+                    status_code = message["status"]
+                    # Add security headers
+                    headers = list(message.get("headers", []))
+                    headers.extend([
+                        (b"x-frame-options", b"DENY"),
+                        (b"x-content-type-options", b"nosniff"),
+                        (b"x-xss-protection", b"1; mode=block"),
+                        (b"strict-transport-security", b"max-age=31536000; includeSubDomains"),
+                        (b"referrer-policy", b"strict-origin-when-cross-origin"),
+                        (b"content-security-policy", b"default-src 'self'")
+                    ])
+                    message["headers"] = headers
+                await send(message)
+            
             # Process request
-            response = await call_next(request)
+            await self.app(scope, receive, send_wrapper)
             
             # Log successful access
             await self._log_access(
@@ -71,13 +103,8 @@ class HIPAASecurityMiddleware:
                 client_ip=client_ip,
                 user_agent=user_agent,
                 success=True,
-                response_status=response.status_code
+                response_status=status_code
             )
-            
-            # Add security headers
-            self._add_security_headers(response)
-            
-            return response
             
         except HTTPException as e:
             # Log failed access attempt
@@ -90,7 +117,9 @@ class HIPAASecurityMiddleware:
                 success=False,
                 failure_reason=str(e.detail)
             )
-            raise
+            # Send error response
+            response = Response(content=str(e.detail), status_code=e.status_code)
+            await response(scope, receive, send)
         except Exception as e:
             # Log unexpected errors
             logger.error(f"HIPAA middleware error: {str(e)}")
@@ -103,7 +132,9 @@ class HIPAASecurityMiddleware:
                 success=False,
                 failure_reason=f"System error: {str(e)}"
             )
-            raise HTTPException(status_code=500, detail="Internal server error")
+            # Send error response
+            response = Response(content="Internal server error", status_code=500)
+            await response(scope, receive, send)
     
     def _is_exempt_path(self, path: str) -> bool:
         """Check if path is exempt from HIPAA checks"""

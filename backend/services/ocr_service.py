@@ -1,12 +1,38 @@
-import pytesseract
-import easyocr
-from PIL import Image
-from pdf2image import convert_from_path
+# OCR Service with optional dependencies for development
 import os
 import tempfile
 from typing import List, Tuple, Dict, Any
 import logging
 from dotenv import load_dotenv
+
+# Optional OCR dependencies - gracefully handle missing packages
+try:
+    import pytesseract
+    PYTESSERACT_AVAILABLE = True
+except ImportError:
+    PYTESSERACT_AVAILABLE = False
+    pytesseract = None
+
+try:
+    import easyocr
+    EASYOCR_AVAILABLE = True
+except ImportError:
+    EASYOCR_AVAILABLE = False
+    easyocr = None
+
+try:
+    from PIL import Image
+    PIL_AVAILABLE = True
+except ImportError:
+    PIL_AVAILABLE = False
+    Image = None
+
+try:
+    from pdf2image import convert_from_path
+    PDF2IMAGE_AVAILABLE = True
+except ImportError:
+    PDF2IMAGE_AVAILABLE = False
+    convert_from_path = None
 
 load_dotenv()
 
@@ -17,14 +43,28 @@ class OCRService:
         self.ocr_engine = os.getenv("OCR_ENGINE", "tesseract")
         self.tesseract_cmd = os.getenv("TESSERACT_CMD", "/usr/bin/tesseract")
         
+        # Check if OCR dependencies are available
+        if not PYTESSERACT_AVAILABLE and not EASYOCR_AVAILABLE:
+            logger.warning("No OCR engines available. OCR functionality will be disabled.")
+            self.ocr_available = False
+            return
+        
+        self.ocr_available = True
+        
         # Configure Tesseract
-        if self.ocr_engine == "tesseract":
+        if self.ocr_engine == "tesseract" and PYTESSERACT_AVAILABLE:
             pytesseract.pytesseract.tesseract_cmd = self.tesseract_cmd
+        elif self.ocr_engine == "tesseract" and not PYTESSERACT_AVAILABLE:
+            logger.warning("Tesseract not available, falling back to EasyOCR")
+            self.ocr_engine = "easyocr"
         
         # Initialize EasyOCR reader if needed
         self.easyocr_reader = None
-        if self.ocr_engine == "easyocr":
+        if self.ocr_engine == "easyocr" and EASYOCR_AVAILABLE:
             self.easyocr_reader = easyocr.Reader(['en'])
+        elif self.ocr_engine == "easyocr" and not EASYOCR_AVAILABLE:
+            logger.warning("EasyOCR not available, falling back to Tesseract")
+            self.ocr_engine = "tesseract"
     
     def extract_text_from_pdf(self, pdf_path: str) -> Dict[str, Any]:
         """
@@ -36,6 +76,26 @@ class OCRService:
         Returns:
             Dictionary containing extracted text, confidence, and metadata
         """
+        if not self.ocr_available:
+            return {
+                'text': 'OCR functionality not available - missing dependencies (pytesseract, easyocr, PIL, pdf2image)',
+                'confidence': 0.0,
+                'engine': 'none',
+                'page_count': 0,
+                'page_results': [],
+                'error': 'OCR dependencies not installed'
+            }
+        
+        if not PDF2IMAGE_AVAILABLE:
+            return {
+                'text': 'PDF processing not available - missing pdf2image dependency',
+                'confidence': 0.0,
+                'engine': self.ocr_engine,
+                'page_count': 0,
+                'page_results': [],
+                'error': 'pdf2image not installed'
+            }
+        
         try:
             # Convert PDF to images
             images = convert_from_path(pdf_path, dpi=300)

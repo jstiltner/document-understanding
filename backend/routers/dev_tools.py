@@ -13,7 +13,7 @@ from database.models import User, Document, FieldDefinition
 from services.llm_service import LLMService
 from services.ocr_service import OCRService
 from services.field_service import FieldDefinitionService
-from services.azure_auth_service import AzureAuthService
+from services.azure_auth_service import AzureEntraIDService
 from auth.dependencies import dev_mode_only, get_dev_user
 
 router = APIRouter(
@@ -267,7 +267,7 @@ async def test_azure_auth():
     Returns the configuration status and connection test results.
     """
     try:
-        azure_auth = AzureAuthService()
+        azure_auth = AzureEntraIDService(db)
         config_status = azure_auth.get_configuration_status()
         
         # Test connection if configured

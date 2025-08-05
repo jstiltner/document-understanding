@@ -82,11 +82,23 @@ if exist "backend\requirements.txt" (
 )
 
 REM Install frontend dependencies
-echo [INFO] Installing frontend dependencies...
+echo [INFO] Installing frontend dependencies with Vite...
 if exist "frontend" (
     cd frontend
+    
+    REM Remove old node_modules and package-lock.json if they exist
+    if exist "node_modules" (
+        echo [INFO] Removing old node_modules...
+        rmdir /s /q node_modules
+    )
+    
+    if exist "package-lock.json" (
+        echo [INFO] Removing old package-lock.json...
+        del package-lock.json
+    )
+    
     npm install
-    echo [SUCCESS] Frontend dependencies installed
+    echo [SUCCESS] Frontend dependencies installed with Vite
     cd ..
 ) else (
     echo [WARNING] Frontend directory not found
@@ -204,9 +216,9 @@ REM Backend start script
 REM Frontend start script
 (
     echo @echo off
-    echo echo Starting Document Understanding API Frontend...
+    echo echo Starting Document Understanding API Frontend with Vite...
     echo cd frontend
-    echo npm start
+    echo npm run dev
 ) > scripts\start-frontend.bat
 
 REM Test script
@@ -238,7 +250,7 @@ echo    scripts\start-frontend.bat ^(in another terminal^)
 echo.
 echo 🔗 Development URLs:
 echo    Backend API: http://localhost:8000
-echo    Frontend: http://localhost:3000
+echo    Frontend: http://localhost:3000 ^(Vite dev server^)
 echo    API Documentation: http://localhost:8000/docs
 echo    Health Check: http://localhost:8000/health
 echo.

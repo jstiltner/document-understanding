@@ -136,11 +136,23 @@ else
 fi
 
 # Install frontend dependencies
-print_status "Installing frontend dependencies..."
+print_status "Installing frontend dependencies with Vite..."
 if [ -d "frontend" ]; then
     cd frontend
+    
+    # Remove old node_modules and package-lock.json if they exist
+    if [ -d "node_modules" ]; then
+        print_status "Removing old node_modules..."
+        rm -rf node_modules
+    fi
+    
+    if [ -f "package-lock.json" ]; then
+        print_status "Removing old package-lock.json..."
+        rm -f package-lock.json
+    fi
+    
     npm install
-    print_success "Frontend dependencies installed"
+    print_success "Frontend dependencies installed with Vite"
     cd ..
 else
     print_warning "Frontend directory not found"
@@ -291,15 +303,15 @@ EOF
 # Frontend start script
 cat > scripts/start-frontend.sh << 'EOF'
 #!/bin/bash
-echo "Starting Document Understanding API Frontend..."
+echo "Starting Document Understanding API Frontend with Vite..."
 cd frontend
-npm start
+npm run dev
 EOF
 
 # Full stack start script
 cat > scripts/start-dev.sh << 'EOF'
 #!/bin/bash
-echo "Starting full development environment..."
+echo "Starting full development environment with Vite..."
 
 # Start backend in background
 echo "Starting backend..."
@@ -310,13 +322,13 @@ BACKEND_PID=$!
 sleep 3
 
 # Start frontend in background
-echo "Starting frontend..."
+echo "Starting frontend with Vite..."
 ./scripts/start-frontend.sh &
 FRONTEND_PID=$!
 
 echo "Development environment started!"
 echo "Backend: http://localhost:8000"
-echo "Frontend: http://localhost:3000"
+echo "Frontend: http://localhost:3000 (Vite dev server)"
 echo "API Docs: http://localhost:8000/docs"
 echo ""
 echo "Press Ctrl+C to stop all services"
