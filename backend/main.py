@@ -6,11 +6,11 @@ import os
 import shutil
 import uuid
 from datetime import datetime
-from typing import List, Optional
+from typing import List, Optional, Dict, Any
 import logging
 
-from database import get_db, init_db, Document, FieldExtraction, AuditLog
-from services import OCRService, LLMService
+from database import get_db, init_db, Document, FieldExtraction, AuditLog, FieldDefinition, HumanFeedback, ModelPerformance
+from services import OCRService, LLMService, FieldDefinitionService, ReinforcementLearningService
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -35,7 +35,6 @@ app.add_middleware(
 
 # Initialize services
 ocr_service = OCRService()
-llm_service = LLMService()
 
 # Create upload directory
 UPLOAD_DIR = os.getenv("UPLOAD_DIR", "./uploads")
@@ -43,9 +42,20 @@ os.makedirs(UPLOAD_DIR, exist_ok=True)
 
 @app.on_event("startup")
 async def startup_event():
-    """Initialize database on startup"""
+    """Initialize database and services on startup"""
     init_db()
     logger.info("Database initialized")
+    
+    # Initialize field definitions with default values
+    db = next(get_db())
+    try:
+        field_service = FieldDefinitionService(db)
+        field_service.initialize_default_fields()
+        logger.info("Field definitions initialized")
+    except Exception as e:
+        logger.error(f"Failed to initialize field definitions: {e}")
+    finally:
+        db.close()
 
 @app.get("/")
 async def root():
@@ -53,8 +63,9 @@ async def root():
     return {"message": "Document Extraction Pipeline API", "version": "1.0.0"}
 
 @app.get("/health")
-async def health_check():
+async def health_check(db: Session = Depends(get_db)):
     """Health check endpoint"""
+    llm_service = LLMService(db)
     return {
         "status": "healthy",
         "timestamp": datetime.utcnow().isoformat(),
@@ -144,6 +155,10 @@ async def process_document(document_id: int):
             logger.error(f"Document {document_id} not found")
             return
         
+        # Initialize services with database connection
+        llm_service = LLMService(db)
+        field_service = FieldDefinitionService(db)
+        
         # Update status
         document.processing_status = "processing"
         db.commit()
@@ -205,13 +220,16 @@ async def process_document(document_id: int):
         db.commit()
         
         # Store individual field extractions
+        required_fields = field_service.get_required_fields()
+        required_field_names = [f.name for f in required_fields]
+        
         for field_name, field_value in extraction_result['extracted_fields'].items():
             field_extraction = FieldExtraction(
                 document_id=document_id,
                 field_name=field_name,
                 field_value=str(field_value),
                 confidence_score=extraction_result['confidence_scores'].get(field_name, 0.0),
-                is_required=field_name in llm_service.required_fields,
+                is_required=field_name in required_field_names,
                 extraction_method="llm"
             )
             db.add(field_extraction)
@@ -227,7 +245,8 @@ async def process_document(document_id: int):
                 "requires_review": extraction_result['requires_review'],
                 "fields_extracted": len(extraction_result['extracted_fields']),
                 "provider": extraction_result['provider'],
-                "model": extraction_result['model']
+                "model": extraction_result['model'],
+                "model_version": extraction_result.get('model_version')
             }
         )
         db.add(audit_log)
@@ -366,10 +385,11 @@ async def get_document_for_review(document_id: int, db: Session = Depends(get_db
     }
 
 @app.get("/config/llm-providers")
-async def get_llm_providers():
+async def get_llm_providers(db: Session = Depends(get_db)):
     """
     Get available LLM providers and models
     """
+    llm_service = LLMService(db)
     providers = {}
     
     for provider in llm_service.get_available_providers():
@@ -382,6 +402,255 @@ async def get_llm_providers():
         "providers": providers,
         "default_provider": llm_service.default_provider
     }
+
+# Field Definition Management Endpoints
+
+@app.get("/fields", response_model=List[dict])
+async def get_field_definitions(db: Session = Depends(get_db)):
+    """Get all active field definitions"""
+    field_service = FieldDefinitionService(db)
+    fields = field_service.get_active_fields()
+    
+    return [
+        {
+            "id": field.id,
+            "name": field.name,
+            "display_name": field.display_name,
+            "description": field.description,
+            "field_type": field.field_type,
+            "is_required": field.is_required,
+            "validation_pattern": field.validation_pattern,
+            "extraction_hints": field.extraction_hints,
+            "is_active": field.is_active
+        }
+        for field in fields
+    ]
+
+@app.post("/fields", response_model=dict)
+async def create_field_definition(field_data: Dict[str, Any], db: Session = Depends(get_db)):
+    """Create a new field definition"""
+    field_service = FieldDefinitionService(db)
+    
+    try:
+        field_def = field_service.create_field_definition(field_data)
+        return {
+            "id": field_def.id,
+            "name": field_def.name,
+            "display_name": field_def.display_name,
+            "message": "Field definition created successfully"
+        }
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+@app.put("/fields/{field_id}", response_model=dict)
+async def update_field_definition(
+    field_id: int,
+    field_data: Dict[str, Any],
+    db: Session = Depends(get_db)
+):
+    """Update an existing field definition"""
+    field_service = FieldDefinitionService(db)
+    
+    field_def = field_service.update_field_definition(field_id, field_data)
+    if not field_def:
+        raise HTTPException(status_code=404, detail="Field definition not found")
+    
+    return {
+        "id": field_def.id,
+        "name": field_def.name,
+        "display_name": field_def.display_name,
+        "message": "Field definition updated successfully"
+    }
+
+@app.delete("/fields/{field_id}")
+async def delete_field_definition(field_id: int, db: Session = Depends(get_db)):
+    """Delete (deactivate) a field definition"""
+    field_service = FieldDefinitionService(db)
+    
+    success = field_service.delete_field_definition(field_id)
+    if not success:
+        raise HTTPException(status_code=404, detail="Field definition not found")
+    
+    return {"message": "Field definition deactivated successfully"}
+
+# Human Feedback and RL Endpoints
+
+@app.post("/documents/{document_id}/feedback")
+async def submit_human_feedback(
+    document_id: int,
+    feedback_data: Dict[str, Any],
+    db: Session = Depends(get_db)
+):
+    """Submit human feedback for RL training"""
+    rl_service = ReinforcementLearningService(db)
+    
+    try:
+        # Extract feedback data
+        field_name = feedback_data.get("field_name")
+        original_value = feedback_data.get("original_value")
+        corrected_value = feedback_data.get("corrected_value")
+        original_confidence = feedback_data.get("original_confidence", 0.0)
+        feedback_type = feedback_data.get("feedback_type")  # correction, addition, removal, confirmation
+        reviewer_id = feedback_data.get("reviewer_id", "anonymous")
+        model_version = feedback_data.get("model_version", "unknown")
+        ocr_context = feedback_data.get("ocr_context")
+        
+        if not field_name or not feedback_type:
+            raise HTTPException(status_code=400, detail="field_name and feedback_type are required")
+        
+        feedback = rl_service.record_human_feedback(
+            document_id=document_id,
+            field_name=field_name,
+            original_value=original_value,
+            corrected_value=corrected_value,
+            original_confidence=original_confidence,
+            feedback_type=feedback_type,
+            reviewer_id=reviewer_id,
+            model_version=model_version,
+            ocr_context=ocr_context
+        )
+        
+        return {
+            "feedback_id": feedback.id,
+            "reward_score": feedback.reward_score,
+            "message": "Feedback recorded successfully"
+        }
+        
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+@app.post("/documents/{document_id}/review/complete")
+async def complete_document_review(
+    document_id: int,
+    review_data: Dict[str, Any],
+    db: Session = Depends(get_db)
+):
+    """Complete document review and record all feedback"""
+    document = db.query(Document).filter(Document.id == document_id).first()
+    if not document:
+        raise HTTPException(status_code=404, detail="Document not found")
+    
+    rl_service = ReinforcementLearningService(db)
+    reviewer_id = review_data.get("reviewer_id", "anonymous")
+    corrected_fields = review_data.get("corrected_fields", {})
+    model_version = document.llm_model or "unknown"
+    
+    feedback_count = 0
+    
+    try:
+        # Process each field correction
+        for field_name, correction_data in corrected_fields.items():
+            original_value = correction_data.get("original_value")
+            corrected_value = correction_data.get("corrected_value")
+            original_confidence = correction_data.get("original_confidence", 0.0)
+            
+            # Determine feedback type
+            if original_value and corrected_value:
+                if original_value.strip() == corrected_value.strip():
+                    feedback_type = "confirmation"
+                else:
+                    feedback_type = "correction"
+            elif not original_value and corrected_value:
+                feedback_type = "addition"
+            elif original_value and not corrected_value:
+                feedback_type = "removal"
+            else:
+                continue  # Skip if both are empty
+            
+            rl_service.record_human_feedback(
+                document_id=document_id,
+                field_name=field_name,
+                original_value=original_value,
+                corrected_value=corrected_value,
+                original_confidence=original_confidence,
+                feedback_type=feedback_type,
+                reviewer_id=reviewer_id,
+                model_version=model_version,
+                ocr_context=document.ocr_text
+            )
+            feedback_count += 1
+        
+        # Update document review status
+        document.review_completed = True
+        document.reviewed_by = reviewer_id
+        document.review_timestamp = datetime.utcnow()
+        document.review_notes = review_data.get("notes", "")
+        document.processing_status = "completed"
+        
+        # Update extracted fields with corrected values
+        for field_name, correction_data in corrected_fields.items():
+            corrected_value = correction_data.get("corrected_value")
+            if corrected_value:
+                document.extracted_fields[field_name] = corrected_value
+        
+        db.commit()
+        
+        return {
+            "message": "Review completed successfully",
+            "feedback_records": feedback_count
+        }
+        
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(status_code=400, detail=str(e))
+
+@app.get("/analytics/model-performance")
+async def get_model_performance(
+    model_version: Optional[str] = None,
+    db: Session = Depends(get_db)
+):
+    """Get model performance analytics"""
+    rl_service = ReinforcementLearningService(db)
+    
+    performance_data = rl_service.get_model_performance(model_version)
+    summary = rl_service.get_performance_summary()
+    
+    return {
+        "performance_by_field": [
+            {
+                "model_version": perf.model_version,
+                "field_name": perf.field_name,
+                "total_predictions": perf.total_predictions,
+                "correct_predictions": perf.correct_predictions,
+                "false_positives": perf.false_positives,
+                "false_negatives": perf.false_negatives,
+                "precision": perf.precision,
+                "recall": perf.recall,
+                "f1_score": perf.f1_score,
+                "avg_reward": perf.avg_reward
+            }
+            for perf in performance_data
+        ],
+        "summary": summary
+    }
+
+@app.get("/analytics/feedback-data")
+async def get_feedback_data(
+    model_version: Optional[str] = None,
+    field_name: Optional[str] = None,
+    limit: int = 100,
+    db: Session = Depends(get_db)
+):
+    """Get human feedback data for analysis"""
+    rl_service = ReinforcementLearningService(db)
+    
+    feedback_data = rl_service.get_feedback_for_training(model_version, field_name, limit)
+    
+    return [
+        {
+            "id": feedback.id,
+            "document_id": feedback.document_id,
+            "field_name": feedback.field_name,
+            "original_value": feedback.original_value,
+            "corrected_value": feedback.corrected_value,
+            "original_confidence": feedback.original_confidence,
+            "feedback_type": feedback.feedback_type,
+            "reward_score": feedback.reward_score,
+            "model_version": feedback.model_version,
+            "review_timestamp": feedback.review_timestamp.isoformat()
+        }
+        for feedback in feedback_data
+    ]
 
 if __name__ == "__main__":
     import uvicorn

@@ -5,15 +5,19 @@ from typing import Dict, Any, List, Optional
 from anthropic import Anthropic
 import openai
 from dotenv import load_dotenv
+from sqlalchemy.orm import Session
+from .field_service import FieldDefinitionService
 
 load_dotenv()
 
 logger = logging.getLogger(__name__)
 
 class LLMService:
-    def __init__(self):
+    def __init__(self, db: Session = None):
         self.anthropic_client = None
         self.openai_client = None
+        self.db = db
+        self.field_service = FieldDefinitionService(db) if db else None
         
         # Initialize clients based on available API keys
         anthropic_key = os.getenv("ANTHROPIC_API_KEY")
@@ -28,36 +32,12 @@ class LLMService:
         self.default_provider = os.getenv("DEFAULT_LLM_PROVIDER", "anthropic")
         self.default_model = os.getenv("DEFAULT_LLM_MODEL", "claude-3-sonnet-20240229")
         
-        # Define required and optional fields
-        self.required_fields = [
-            "Facility",
-            "Reference Number", 
-            "Patient Last Name",
-            "Patient First Name",
-            "Member ID",
-            "Date of Birth",
-            "Denial Reason"
-        ]
-        
-        self.optional_fields = [
-            "Payer",
-            "Authorization Number",
-            "Account Number", 
-            "Working DRG",
-            "3rd party reviewer",
-            "Level of Care",
-            "Service",
-            "Clinical Care Guidelines",
-            "Provider TIN",
-            "Case Manager",
-            "Peer to Peer email",
-            "Peer to Peer phone",
-            "Peer to peer fax"
-        ]
+        # Model version for RL tracking
+        self.model_version = f"{self.default_provider}_{self.default_model}_v1.0"
     
     def extract_fields(self, ocr_text: str, provider: str = None, model: str = None) -> Dict[str, Any]:
         """
-        Extract fields from OCR text using LLM
+        Extract fields from OCR text using LLM with configurable field definitions
         
         Args:
             ocr_text: Text extracted from OCR
@@ -71,8 +51,17 @@ class LLMService:
         model = model or self.default_model
         
         try:
-            # Create extraction prompt
-            prompt = self._create_extraction_prompt(ocr_text)
+            # Get field definitions from database
+            if self.field_service:
+                required_fields = self.field_service.get_required_fields()
+                optional_fields = self.field_service.get_optional_fields()
+            else:
+                # Fallback to hardcoded fields if no database connection
+                required_fields = self._get_fallback_required_fields()
+                optional_fields = self._get_fallback_optional_fields()
+            
+            # Create extraction prompt with configurable fields
+            prompt = self._create_extraction_prompt(ocr_text, required_fields, optional_fields)
             
             # Extract using specified provider
             if provider == "anthropic" and self.anthropic_client:
@@ -83,18 +72,19 @@ class LLMService:
                 raise ValueError(f"Provider {provider} not available or not configured")
             
             # Parse and validate results
-            extracted_data = self._parse_extraction_result(result)
+            extracted_data = self._parse_extraction_result(result, required_fields + optional_fields)
             
             # Calculate confidence scores
-            confidence_scores = self._calculate_confidence_scores(extracted_data)
+            confidence_scores = self._calculate_confidence_scores(extracted_data, required_fields)
             
             return {
                 'extracted_fields': extracted_data,
                 'confidence_scores': confidence_scores,
                 'overall_confidence': confidence_scores.get('overall', 0.0),
-                'requires_review': self._requires_review(extracted_data, confidence_scores),
+                'requires_review': self._requires_review(extracted_data, confidence_scores, required_fields),
                 'provider': provider,
                 'model': model,
+                'model_version': self.model_version,
                 'raw_response': result
             }
             
@@ -107,30 +97,64 @@ class LLMService:
                 'requires_review': True,
                 'provider': provider,
                 'model': model,
+                'model_version': self.model_version,
                 'error': str(e)
             }
     
-    def _create_extraction_prompt(self, ocr_text: str) -> str:
-        """Create the extraction prompt for the LLM"""
+    def _create_extraction_prompt(self, ocr_text: str, required_fields: List, optional_fields: List) -> str:
+        """Create the extraction prompt for the LLM using configurable field definitions"""
         
-        all_fields = self.required_fields + self.optional_fields
-        fields_list = "\n".join([f"- {field}" for field in all_fields])
+        # Build required fields section
+        required_section = []
+        for field in required_fields:
+            field_name = field.display_name if hasattr(field, 'display_name') else field
+            field_desc = field.description if hasattr(field, 'description') else ""
+            if field_desc:
+                required_section.append(f"- {field_name}: {field_desc}")
+            else:
+                required_section.append(f"- {field_name}")
+        
+        # Build optional fields section
+        optional_section = []
+        for field in optional_fields:
+            field_name = field.display_name if hasattr(field, 'display_name') else field
+            field_desc = field.description if hasattr(field, 'description') else ""
+            if field_desc:
+                optional_section.append(f"- {field_name}: {field_desc}")
+            else:
+                optional_section.append(f"- {field_name}")
+        
+        # Build extraction hints
+        hints_section = []
+        all_fields = required_fields + optional_fields
+        for field in all_fields:
+            if hasattr(field, 'extraction_hints') and field.extraction_hints:
+                hints = field.extraction_hints
+                field_name = field.display_name if hasattr(field, 'display_name') else field
+                if 'keywords' in hints:
+                    keywords = ', '.join(hints['keywords'])
+                    hints_section.append(f"- {field_name}: Look for keywords like '{keywords}'")
         
         prompt = f"""You are an expert at reading insurance authorization and denial documents in a medical workflow. Given OCR text from a multi-page faxed PDF, extract the following fields if present, and output a JSON object with only the found fields:
 
 Required Fields (must be found for successful processing):
-{chr(10).join([f"- {field}" for field in self.required_fields])}
+{chr(10).join(required_section)}
 
 Optional Fields (failing to find these does not result in the record moving to the review UI screen):
-{chr(10).join([f"- {field}" for field in self.optional_fields])}
+{chr(10).join(optional_section)}
+
+Extraction Hints:
+{chr(10).join(hints_section) if hints_section else "Use context clues and common document patterns."}
 
 Instructions:
 1. If a field is missing or cannot be found, omit it from the JSON
 2. Use only valid JSON output, no extra explanation
-3. Be precise with field names - use exactly the names listed above
+3. Be precise with field names - use exactly the display names listed above
 4. For dates, use MM/DD/YYYY format if possible
 5. For phone numbers, use standard formatting (XXX) XXX-XXXX if possible
-6. Look for variations in field names (e.g., "Patient Name" might contain both first and last name)
+6. For email addresses, ensure proper email format
+7. Look for variations in field names and synonyms
+8. Consider the context and location of information in the document
 
 OCR Text to analyze:
 {ocr_text}
@@ -172,7 +196,7 @@ Output only valid JSON:"""
             logger.error(f"OpenAI API error: {str(e)}")
             raise
     
-    def _parse_extraction_result(self, result: str) -> Dict[str, Any]:
+    def _parse_extraction_result(self, result: str, field_definitions: List) -> Dict[str, Any]:
         """Parse the LLM response into structured data"""
         try:
             # Clean the response - remove any markdown formatting
@@ -186,18 +210,33 @@ Output only valid JSON:"""
             # Parse JSON
             extracted_data = json.loads(cleaned_result)
             
-            # Validate field names
-            valid_fields = self.required_fields + self.optional_fields
+            # Build valid field names from definitions
+            valid_fields = []
+            field_name_mapping = {}
+            
+            for field_def in field_definitions:
+                if hasattr(field_def, 'display_name'):
+                    display_name = field_def.display_name
+                    internal_name = field_def.name
+                    valid_fields.append(display_name)
+                    field_name_mapping[display_name] = internal_name
+                else:
+                    # Fallback for string fields
+                    valid_fields.append(field_def)
+                    field_name_mapping[field_def] = field_def.lower().replace(' ', '_')
+            
             validated_data = {}
             
             for key, value in extracted_data.items():
                 if key in valid_fields:
-                    validated_data[key] = value
+                    internal_name = field_name_mapping.get(key, key)
+                    validated_data[internal_name] = value
                 else:
                     # Try to find close matches
                     for valid_field in valid_fields:
                         if key.lower().replace(' ', '') == valid_field.lower().replace(' ', ''):
-                            validated_data[valid_field] = value
+                            internal_name = field_name_mapping.get(valid_field, valid_field)
+                            validated_data[internal_name] = value
                             break
             
             return validated_data
@@ -210,7 +249,7 @@ Output only valid JSON:"""
             logger.error(f"Error parsing extraction result: {str(e)}")
             return {}
     
-    def _calculate_confidence_scores(self, extracted_data: Dict[str, Any]) -> Dict[str, float]:
+    def _calculate_confidence_scores(self, extracted_data: Dict[str, Any], required_fields: List) -> Dict[str, float]:
         """Calculate confidence scores for extracted fields"""
         confidence_scores = {}
         
@@ -222,28 +261,53 @@ Output only valid JSON:"""
                 # Base confidence on field completeness and format
                 confidence = 0.8  # Base confidence
                 
-                # Adjust based on field type and format
-                if field in ["Date of Birth"] and self._is_valid_date(str(value)):
-                    confidence = 0.9
-                elif field in ["Member ID", "Reference Number"] and len(str(value)) > 3:
-                    confidence = 0.9
-                elif field in ["Patient First Name", "Patient Last Name"] and len(str(value)) > 1:
-                    confidence = 0.85
-                elif len(str(value)) < 2:
+                # Get field definition for validation
+                field_def = None
+                if self.field_service:
+                    field_def = self.field_service.get_field_by_name(field)
+                
+                if field_def and hasattr(field_def, 'field_type'):
+                    # Adjust confidence based on field type validation
+                    if field_def.field_type == "date" and self._is_valid_date(str(value)):
+                        confidence = 0.9
+                    elif field_def.field_type == "email" and self._is_valid_email(str(value)):
+                        confidence = 0.9
+                    elif field_def.field_type == "phone" and self._is_valid_phone(str(value)):
+                        confidence = 0.9
+                    elif field_def.validation_pattern and self._matches_pattern(str(value), field_def.validation_pattern):
+                        confidence = 0.9
+                else:
+                    # Fallback validation
+                    if "date" in field.lower() and self._is_valid_date(str(value)):
+                        confidence = 0.9
+                    elif field in ["member_id", "reference_number"] and len(str(value)) > 3:
+                        confidence = 0.9
+                    elif "name" in field.lower() and len(str(value)) > 1:
+                        confidence = 0.85
+                
+                if len(str(value)) < 2:
                     confidence = 0.5
                 
                 confidence_scores[field] = confidence
         
         # Calculate overall confidence
         if confidence_scores:
+            # Get required field names
+            required_field_names = []
+            for field_def in required_fields:
+                if hasattr(field_def, 'name'):
+                    required_field_names.append(field_def.name)
+                else:
+                    required_field_names.append(field_def.lower().replace(' ', '_'))
+            
             # Weight required fields more heavily
-            required_scores = [confidence_scores.get(field, 0.0) for field in self.required_fields if field in confidence_scores]
-            optional_scores = [confidence_scores.get(field, 0.0) for field in self.optional_fields if field in confidence_scores]
+            required_scores = [confidence_scores.get(field, 0.0) for field in required_field_names if field in confidence_scores]
+            all_scores = list(confidence_scores.values())
             
             if required_scores:
                 required_avg = sum(required_scores) / len(required_scores)
-                optional_avg = sum(optional_scores) / len(optional_scores) if optional_scores else 0.0
-                overall_confidence = (required_avg * 0.8) + (optional_avg * 0.2)
+                all_avg = sum(all_scores) / len(all_scores)
+                overall_confidence = (required_avg * 0.8) + (all_avg * 0.2)
             else:
                 overall_confidence = 0.0
             
@@ -253,14 +317,22 @@ Output only valid JSON:"""
         
         return confidence_scores
     
-    def _requires_review(self, extracted_data: Dict[str, Any], confidence_scores: Dict[str, float]) -> bool:
+    def _requires_review(self, extracted_data: Dict[str, Any], confidence_scores: Dict[str, float], required_fields: List) -> bool:
         """Determine if document requires manual review"""
+        
+        # Get required field names
+        required_field_names = []
+        for field_def in required_fields:
+            if hasattr(field_def, 'name'):
+                required_field_names.append(field_def.name)
+            else:
+                required_field_names.append(field_def.lower().replace(' ', '_'))
         
         # Check if all required fields are present
         missing_required = []
-        for field in self.required_fields:
-            if field not in extracted_data or not extracted_data[field]:
-                missing_required.append(field)
+        for field_name in required_field_names:
+            if field_name not in extracted_data or not extracted_data[field_name]:
+                missing_required.append(field_name)
         
         # Check confidence thresholds
         min_confidence = float(os.getenv("MIN_CONFIDENCE_THRESHOLD", "0.7"))
@@ -278,8 +350,8 @@ Output only valid JSON:"""
         if overall_confidence < min_confidence:
             return True
         
-        for field in self.required_fields:
-            if field in confidence_scores and confidence_scores[field] < required_threshold:
+        for field_name in required_field_names:
+            if field_name in confidence_scores and confidence_scores[field_name] < required_threshold:
                 return True
         
         return False
@@ -323,3 +395,76 @@ Output only valid JSON:"""
                 "gpt-3.5-turbo"
             ]
         return []
+    
+    def _is_valid_email(self, email_str: str) -> bool:
+        """Simple email validation"""
+        import re
+        pattern = r'^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$'
+        return bool(re.match(pattern, email_str.strip()))
+    
+    def _is_valid_phone(self, phone_str: str) -> bool:
+        """Simple phone validation"""
+        import re
+        patterns = [
+            r'^\(\d{3}\) \d{3}-\d{4}$',
+            r'^\d{3}-\d{3}-\d{4}$',
+            r'^\d{10}$'
+        ]
+        
+        for pattern in patterns:
+            if re.match(pattern, phone_str.strip()):
+                return True
+        return False
+    
+    def _matches_pattern(self, value: str, pattern: str) -> bool:
+        """Check if value matches regex pattern"""
+        import re
+        try:
+            return bool(re.match(pattern, value.strip()))
+        except re.error:
+            return False
+    
+    def _get_fallback_required_fields(self) -> List[str]:
+        """Fallback required fields when database is not available"""
+        return [
+            "Facility",
+            "Reference Number",
+            "Patient Last Name",
+            "Patient First Name",
+            "Member ID",
+            "Date of Birth",
+            "Denial Reason"
+        ]
+    
+    def _get_fallback_optional_fields(self) -> List[str]:
+        """Fallback optional fields when database is not available"""
+        return [
+            "Payer",
+            "Authorization Number",
+            "Account Number",
+            "Working DRG",
+            "3rd party reviewer",
+            "Level of Care",
+            "Service",
+            "Clinical Care Guidelines",
+            "Provider TIN",
+            "Case Manager",
+            "Peer to Peer email",
+            "Peer to Peer phone",
+            "Peer to peer fax"
+        ]
+    
+    def get_field_definitions(self) -> Dict[str, List]:
+        """Get current field definitions"""
+        if self.field_service:
+            required_fields = self.field_service.get_required_fields()
+            optional_fields = self.field_service.get_optional_fields()
+            return {
+                "required": required_fields,
+                "optional": optional_fields
+            }
+        else:
+            return {
+                "required": self._get_fallback_required_fields(),
+                "optional": self._get_fallback_optional_fields()
+            }

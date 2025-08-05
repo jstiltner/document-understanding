@@ -2,6 +2,7 @@ import React, { useState, useEffect } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import { Row, Col, Card, Button, Form, Alert, Spinner, Badge, Tabs, Tab } from 'react-bootstrap';
 import { documentApi, ReviewDocument } from '../services/api';
+import axios from 'axios';
 
 const DocumentReview: React.FC = () => {
   const { documentId } = useParams<{ documentId: string }>();
@@ -56,12 +57,53 @@ const DocumentReview: React.FC = () => {
 
     setSaving(true);
     try {
-      // Here you would typically call an API to save the reviewed fields
-      // For now, we'll just simulate the save
-      await new Promise(resolve => setTimeout(resolve, 1000));
+      // Prepare corrected fields data for RL feedback
+      const correctedFields: Record<string, any> = {};
       
-      // Navigate back to dashboard
-      navigate('/');
+      // Process required fields
+      Object.entries(document.required_fields).forEach(([fieldName, field]) => {
+        const originalValue = (field as any).value || '';
+        const correctedValue = editedFields[fieldName] || '';
+        const originalConfidence = (field as any).confidence || 0;
+        
+        correctedFields[fieldName] = {
+          original_value: originalValue,
+          corrected_value: correctedValue,
+          original_confidence: originalConfidence
+        };
+      });
+      
+      // Process optional fields
+      Object.entries(document.optional_fields).forEach(([fieldName, field]) => {
+        const originalValue = (field as any).value || '';
+        const correctedValue = editedFields[fieldName] || '';
+        const originalConfidence = (field as any).confidence || 0;
+        
+        correctedFields[fieldName] = {
+          original_value: originalValue,
+          corrected_value: correctedValue,
+          original_confidence: originalConfidence
+        };
+      });
+      
+      // Submit review completion with RL feedback
+      const reviewData = {
+        reviewer_id: 'user', // In a real app, this would be the logged-in user ID
+        corrected_fields: correctedFields,
+        notes: 'Manual review completed'
+      };
+      
+      const response = await axios.post(
+        `/documents/${document.document_id}/review/complete`,
+        reviewData
+      );
+      
+      if (response.status === 200) {
+        // Navigate back to dashboard
+        navigate('/');
+      } else {
+        throw new Error('Failed to complete review');
+      }
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to save changes');
     } finally {

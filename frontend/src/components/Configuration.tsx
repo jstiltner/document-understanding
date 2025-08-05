@@ -1,6 +1,7 @@
 import React, { useState, useEffect } from 'react';
-import { Row, Col, Card, Form, Button, Alert, Spinner, Badge } from 'react-bootstrap';
+import { Row, Col, Card, Form, Button, Alert, Spinner, Badge, Tabs, Tab } from 'react-bootstrap';
 import { documentApi, LLMConfig } from '../services/api';
+import FieldManagement from './FieldManagement';
 
 const Configuration: React.FC = () => {
   const [config, setConfig] = useState<LLMConfig | null>(null);
@@ -110,7 +111,7 @@ const Configuration: React.FC = () => {
       <Row className="mb-4">
         <Col>
           <h1>Configuration</h1>
-          <p className="text-muted">Configure LLM providers and API settings</p>
+          <p className="text-muted">Configure system settings, LLM providers, and field definitions</p>
         </Col>
       </Row>
 
@@ -126,7 +127,9 @@ const Configuration: React.FC = () => {
         </Alert>
       )}
 
-      <Row>
+      <Tabs defaultActiveKey="llm" className="mb-4">
+        <Tab eventKey="llm" title="LLM Configuration">
+          <Row>
         <Col lg={8}>
           <Card className="mb-4">
             <Card.Header>
@@ -314,6 +317,12 @@ const Configuration: React.FC = () => {
           </Card>
         </Col>
       </Row>
+        </Tab>
+        
+        <Tab eventKey="fields" title="Field Management">
+          <FieldManagement />
+        </Tab>
+      </Tabs>
     </div>
   );
 };

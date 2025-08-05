@@ -1,14 +1,20 @@
 from .database import get_db, init_db, engine, SessionLocal
-from .models import Document, FieldExtraction, AuditLog, Configuration, ProcessingQueue
+from .models import (
+    Document, FieldExtraction, AuditLog, Configuration, ProcessingQueue,
+    FieldDefinition, HumanFeedback, ModelPerformance
+)
 
 __all__ = [
     "get_db",
-    "init_db", 
+    "init_db",
     "engine",
     "SessionLocal",
     "Document",
-    "FieldExtraction", 
+    "FieldExtraction",
     "AuditLog",
     "Configuration",
-    "ProcessingQueue"
+    "ProcessingQueue",
+    "FieldDefinition",
+    "HumanFeedback",
+    "ModelPerformance"
 ]
