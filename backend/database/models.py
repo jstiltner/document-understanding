@@ -38,10 +38,17 @@ class Document(Base):
     review_timestamp = Column(DateTime(timezone=True))
     review_notes = Column(Text)
     
+    # Batch processing
+    batch_upload_id = Column(Integer, ForeignKey("batch_uploads.id"))
+    
     # Relationships
     extractions = relationship("FieldExtraction", back_populates="document")
     audit_logs = relationship("AuditLog", back_populates="document")
     human_feedback = relationship("HumanFeedback", back_populates="document")
+    batch_upload = relationship("BatchUpload", back_populates="documents")
+    quality_assessment = relationship("DocumentQuality", back_populates="document", uselist=False)
+    rule_violations = relationship("BusinessRuleViolation", back_populates="document")
+    workflow_assignments = relationship("WorkflowAssignment", back_populates="document")
 
 class FieldExtraction(Base):
     __tablename__ = "field_extractions"
@@ -151,3 +158,111 @@ class ProcessingQueue(Base):
     error_message = Column(Text)
     retry_count = Column(Integer, default=0)
     max_retries = Column(Integer, default=3)
+
+class User(Base):
+    __tablename__ = "users"
+    
+    id = Column(Integer, primary_key=True, index=True)
+    username = Column(String, unique=True, nullable=False, index=True)
+    email = Column(String, unique=True, nullable=False, index=True)
+    hashed_password = Column(String, nullable=False)
+    full_name = Column(String)
+    role = Column(String, default="reviewer")  # admin, supervisor, reviewer, viewer
+    is_active = Column(Boolean, default=True)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    last_login = Column(DateTime(timezone=True))
+    
+    # Relationships
+    reviewed_documents = relationship("Document", foreign_keys="Document.reviewed_by")
+    audit_logs = relationship("AuditLog", foreign_keys="AuditLog.user_id")
+
+class BatchUpload(Base):
+    __tablename__ = "batch_uploads"
+    
+    id = Column(Integer, primary_key=True, index=True)
+    batch_name = Column(String, nullable=False)
+    uploaded_by = Column(String, ForeignKey("users.username"), nullable=False)
+    total_documents = Column(Integer, default=0)
+    processed_documents = Column(Integer, default=0)
+    failed_documents = Column(Integer, default=0)
+    status = Column(String, default="pending")  # pending, processing, completed, failed
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    completed_at = Column(DateTime(timezone=True))
+    
+    # Relationships
+    documents = relationship("Document", back_populates="batch_upload")
+    uploader = relationship("User", foreign_keys=[uploaded_by])
+
+class DocumentQuality(Base):
+    __tablename__ = "document_quality"
+    
+    id = Column(Integer, primary_key=True, index=True)
+    document_id = Column(Integer, ForeignKey("documents.id"), nullable=False)
+    image_dpi = Column(Integer)
+    image_clarity_score = Column(Float)
+    text_density_score = Column(Float)
+    overall_quality_score = Column(Float)
+    quality_issues = Column(JSON)  # List of detected issues
+    recommendations = Column(JSON)  # Improvement recommendations
+    assessed_at = Column(DateTime(timezone=True), server_default=func.now())
+    
+    # Relationships
+    document = relationship("Document", back_populates="quality_assessment")
+
+class BusinessRule(Base):
+    __tablename__ = "business_rules"
+    
+    id = Column(Integer, primary_key=True, index=True)
+    name = Column(String, nullable=False)
+    description = Column(Text)
+    rule_type = Column(String, nullable=False)  # field_validation, cross_field, business_logic
+    rule_definition = Column(JSON, nullable=False)  # Rule configuration
+    is_active = Column(Boolean, default=True)
+    severity = Column(String, default="warning")  # error, warning, info
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    updated_at = Column(DateTime(timezone=True), onupdate=func.now())
+
+class BusinessRuleViolation(Base):
+    __tablename__ = "business_rule_violations"
+    
+    id = Column(Integer, primary_key=True, index=True)
+    document_id = Column(Integer, ForeignKey("documents.id"), nullable=False)
+    rule_id = Column(Integer, ForeignKey("business_rules.id"), nullable=False)
+    violation_details = Column(JSON)
+    severity = Column(String, nullable=False)
+    resolved = Column(Boolean, default=False)
+    resolved_by = Column(String, ForeignKey("users.username"))
+    resolved_at = Column(DateTime(timezone=True))
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    
+    # Relationships
+    document = relationship("Document", back_populates="rule_violations")
+    rule = relationship("BusinessRule")
+    resolver = relationship("User", foreign_keys=[resolved_by])
+
+class SystemMetrics(Base):
+    __tablename__ = "system_metrics"
+    
+    id = Column(Integer, primary_key=True, index=True)
+    metric_name = Column(String, nullable=False)
+    metric_value = Column(Float, nullable=False)
+    metric_type = Column(String, nullable=False)  # counter, gauge, histogram
+    labels = Column(JSON)  # Additional metric labels
+    timestamp = Column(DateTime(timezone=True), server_default=func.now())
+
+class WorkflowAssignment(Base):
+    __tablename__ = "workflow_assignments"
+    
+    id = Column(Integer, primary_key=True, index=True)
+    document_id = Column(Integer, ForeignKey("documents.id"), nullable=False)
+    assigned_to = Column(String, ForeignKey("users.username"), nullable=False)
+    assignment_type = Column(String, nullable=False)  # review, quality_check, approval
+    priority = Column(String, default="normal")  # urgent, high, normal, low
+    assigned_at = Column(DateTime(timezone=True), server_default=func.now())
+    due_date = Column(DateTime(timezone=True))
+    completed_at = Column(DateTime(timezone=True))
+    status = Column(String, default="assigned")  # assigned, in_progress, completed, reassigned
+    
+    # Relationships
+    document = relationship("Document", back_populates="workflow_assignments")
+    assignee = relationship("User", foreign_keys=[assigned_to])

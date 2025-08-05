@@ -7,6 +7,7 @@ import openai
 from dotenv import load_dotenv
 from sqlalchemy.orm import Session
 from .field_service import FieldDefinitionService
+from .azure_openai_service import AzureOpenAIService
 
 load_dotenv()
 
@@ -16,6 +17,7 @@ class LLMService:
     def __init__(self, db: Session = None):
         self.anthropic_client = None
         self.openai_client = None
+        self.azure_openai_service = None
         self.db = db
         self.field_service = FieldDefinitionService(db) if db else None
         
@@ -29,6 +31,9 @@ class LLMService:
         if openai_key:
             self.openai_client = openai.OpenAI(api_key=openai_key)
         
+        # Initialize Azure OpenAI service
+        self.azure_openai_service = AzureOpenAIService()
+        
         self.default_provider = os.getenv("DEFAULT_LLM_PROVIDER", "anthropic")
         self.default_model = os.getenv("DEFAULT_LLM_MODEL", "claude-3-sonnet-20240229")
         
@@ -41,7 +46,7 @@ class LLMService:
         
         Args:
             ocr_text: Text extracted from OCR
-            provider: LLM provider to use (anthropic, openai)
+            provider: LLM provider to use (anthropic, openai, azure_openai)
             model: Specific model to use
             
         Returns:
@@ -55,10 +60,16 @@ class LLMService:
             if self.field_service:
                 required_fields = self.field_service.get_required_fields()
                 optional_fields = self.field_service.get_optional_fields()
+                all_field_definitions = required_fields + optional_fields
             else:
                 # Fallback to hardcoded fields if no database connection
                 required_fields = self._get_fallback_required_fields()
                 optional_fields = self._get_fallback_optional_fields()
+                all_field_definitions = self._convert_to_field_definitions(required_fields, optional_fields)
+            
+            # Use Azure OpenAI service if specified
+            if provider == "azure_openai" and self.azure_openai_service.is_configured():
+                return self.azure_openai_service.extract_fields(ocr_text, all_field_definitions, model)
             
             # Create extraction prompt with configurable fields
             prompt = self._create_extraction_prompt(ocr_text, required_fields, optional_fields)
@@ -378,6 +389,8 @@ Output only valid JSON:"""
             providers.append("anthropic")
         if self.openai_client:
             providers.append("openai")
+        if self.azure_openai_service and self.azure_openai_service.is_configured():
+            providers.append("azure_openai")
         return providers
     
     def get_available_models(self, provider: str) -> List[str]:
@@ -394,6 +407,8 @@ Output only valid JSON:"""
                 "gpt-4",
                 "gpt-3.5-turbo"
             ]
+        elif provider == "azure_openai" and self.azure_openai_service:
+            return self.azure_openai_service.get_available_models()
         return []
     
     def _is_valid_email(self, email_str: str) -> bool:
@@ -467,4 +482,109 @@ Output only valid JSON:"""
             return {
                 "required": self._get_fallback_required_fields(),
                 "optional": self._get_fallback_optional_fields()
+            }
+    
+    def _convert_to_field_definitions(self, required_fields: List[str], optional_fields: List[str]) -> List[Dict]:
+        """Convert string field lists to field definition format for Azure OpenAI"""
+        field_definitions = []
+        
+        for field in required_fields:
+            field_definitions.append({
+                'name': field.lower().replace(' ', '_'),
+                'display_name': field,
+                'is_required': True,
+                'field_type': 'text'
+            })
+        
+        for field in optional_fields:
+            field_definitions.append({
+                'name': field.lower().replace(' ', '_'),
+                'display_name': field,
+                'is_required': False,
+                'field_type': 'text'
+            })
+        
+        return field_definitions
+    
+    def get_provider_status(self) -> Dict[str, Dict[str, Any]]:
+        """Get status of all LLM providers"""
+        status = {}
+        
+        # Anthropic status
+        status['anthropic'] = {
+            'available': bool(self.anthropic_client),
+            'configured': bool(os.getenv("ANTHROPIC_API_KEY")),
+            'models': self.get_available_models('anthropic') if self.anthropic_client else []
+        }
+        
+        # OpenAI status
+        status['openai'] = {
+            'available': bool(self.openai_client),
+            'configured': bool(os.getenv("OPENAI_API_KEY")),
+            'models': self.get_available_models('openai') if self.openai_client else []
+        }
+        
+        # Azure OpenAI status
+        if self.azure_openai_service:
+            azure_status = self.azure_openai_service.get_configuration_status()
+            status['azure_openai'] = {
+                'available': azure_status['enabled'],
+                'configured': azure_status['endpoint'] and azure_status['api_key'],
+                'models': self.azure_openai_service.get_available_models() if azure_status['enabled'] else [],
+                'deployments': azure_status.get('deployments', {}),
+                'api_version': azure_status.get('api_version')
+            }
+        else:
+            status['azure_openai'] = {
+                'available': False,
+                'configured': False,
+                'models': []
+            }
+        
+        return status
+    
+    def test_provider_connection(self, provider: str) -> Dict[str, Any]:
+        """Test connection to a specific provider"""
+        if provider == "azure_openai" and self.azure_openai_service:
+            return self.azure_openai_service.test_connection()
+        elif provider == "anthropic" and self.anthropic_client:
+            try:
+                # Test with a simple message
+                response = self.anthropic_client.messages.create(
+                    model="claude-3-haiku-20240307",
+                    max_tokens=10,
+                    messages=[{"role": "user", "content": "Hello"}]
+                )
+                return {
+                    "status": "connected",
+                    "message": "Anthropic connection successful",
+                    "response_id": response.id
+                }
+            except Exception as e:
+                return {
+                    "status": "error",
+                    "message": f"Anthropic connection failed: {str(e)}"
+                }
+        elif provider == "openai" and self.openai_client:
+            try:
+                # Test with a simple completion
+                response = self.openai_client.chat.completions.create(
+                    model="gpt-3.5-turbo",
+                    messages=[{"role": "user", "content": "Hello"}],
+                    max_tokens=10
+                )
+                return {
+                    "status": "connected",
+                    "message": "OpenAI connection successful",
+                    "response_id": response.id
+                }
+            except Exception as e:
+                return {
+                    "status": "error",
+                    "message": f"OpenAI connection failed: {str(e)}"
+                }
+        else:
+            return {
+                "status": "unavailable",
+                "message": f"Provider {provider} not configured or not available"
             }
