@@ -309,7 +309,7 @@ kubectl apply -f k8s/
 ## 📊 Key Features Deep Dive
 
 ### **1. Batch Processing System**
-- **Async Processing**: Handle 100+ documents simultaneously
+- **Async Processing**: accepts up to `max_batch_size: 100` documents per upload
 - **Queue Management**: Priority-based task scheduling
 - **Progress Tracking**: Real-time batch status monitoring
 - **Auto-retry Logic**: Failed document reprocessing
@@ -405,17 +405,21 @@ POST /integration/webhooks/register      # Register webhook endpoints
 
 ## 📈 Performance & Scalability
 
-### **Processing Capacity**
-- **Single Document**: 30-60 seconds average processing time
-- **Batch Processing**: 100+ documents processed simultaneously
-- **Throughput**: 500+ documents per hour with 4 workers
-- **Scalability**: Horizontal worker scaling for increased capacity
+> **Nothing in this project has been benchmarked.** The section below lists configured settings
+> read out of the repository, not measurements. See [Withdrawn performance and accuracy
+> claims](#withdrawn-performance-and-accuracy-claims).
+
+### **What's Configured**
+- **Worker concurrency**: `--concurrency=4` (`docker-compose.yml:79`)
+- **Max batch size**: `max_batch_size: 100` (`backend/main_v2.py:359`) — a per-upload cap, not an
+  observed level of concurrency
+- **Scalability**: Celery workers scale horizontally; no scaling test has been run
 
 ### **Accuracy Metrics**
-- **OCR Accuracy**: 95%+ for good quality documents
-- **Field Extraction**: 85%+ accuracy with continuous improvement
-- **Review Rate**: 20-30% of documents require human review
-- **False Positive Rate**: <5% with business rules validation
+
+None. No OCR accuracy, field-extraction accuracy, review rate or false-positive rate has been
+measured anywhere in this repository. There is no evaluation set, no labelled ground truth and no
+scoring script.
 
 ### **System Requirements**
 
@@ -759,7 +763,8 @@ This project is licensed under the MIT License - see the LICENSE file for detail
 - **Global Deployment**: Multi-region support with CDN integration
 
 ### **Performance & Scalability**
-- **Current Capacity**: 500+ documents/hour with 4 workers
+- **Current Capacity**: unmeasured — see [Withdrawn performance and accuracy
+  claims](#withdrawn-performance-and-accuracy-claims)
 - **Scaling Options**: Horizontal worker scaling, database sharding
 - **Enterprise Ready**: Load balancing, auto-scaling, monitoring
 - **Cloud Native**: Kubernetes deployment with Helm charts
@@ -769,15 +774,55 @@ This project is licensed under the MIT License - see the LICENSE file for detail
 ## 📊 System Metrics & Performance
 
 ### **Processing Performance**
-- **Single Document**: 30-60 seconds average
-- **Batch Processing**: 100+ documents simultaneously
-- **Throughput**: 500+ documents/hour (4 workers)
-- **Accuracy**: 85%+ field extraction with continuous improvement
+
+Unmeasured. See [Withdrawn performance and accuracy
+claims](#withdrawn-performance-and-accuracy-claims) for what this section used to assert and why it
+was removed.
 
 ### **System Requirements**
 - **Development**: 4 cores, 8GB RAM, 100GB storage
 - **Production**: 8+ cores, 16GB+ RAM, 500GB+ SSD
 - **Enterprise**: Load balancer, auto-scaling, monitoring
+
+---
+
+## Withdrawn performance and accuracy claims
+
+*Corrected 2026-09-09, as part of an audit of every quantitative claim published about this
+project.*
+
+This README previously stated the following. **None of them were ever measured.** There is no
+benchmark script, no load test, no evaluation set, no labelled ground truth and no results artifact
+anywhere in this repository.
+
+| Withdrawn claim | Appeared | Why it was withdrawn |
+|---|---|---|
+| **500+ documents/hour (4 workers)** | 3× | Never measured, and **contradicted by this same README**: it also claimed 30–60s per document, which caps 4 workers near 480/hour at the optimistic end and 240/hour at the pessimistic end. The number exceeded its own stated best case. |
+| **100+ documents processed simultaneously** | 3× | This is `max_batch_size: 100` (`backend/main_v2.py:359`), a per-upload limit. It was never an observed concurrency. |
+| **30–60 seconds average processing time** | 2× | An estimate presented as an average. No timing data exists. |
+| **95%+ OCR accuracy** | 1× | Never measured. |
+| **85%+ field extraction accuracy** | 2× | Never measured. |
+| **<5% false positive rate** | 1× | Never measured. |
+| **20–30% of documents require human review** | 1× | Never measured. |
+
+These figures must not be reintroduced without a committed benchmark and a results artifact to
+point at.
+
+### What did hold up
+
+The audit confirmed these, so they are worth stating precisely:
+
+- **3 LLM providers are real.** Anthropic, OpenAI and Azure OpenAI each construct a live client and
+  make actual `messages.create` / `chat.completions.create` calls
+  (`backend/services/llm_service.py`, `backend/services/azure_openai_service.py`). No stubs, no
+  mocks, no `NotImplementedError`.
+- **Exactly 15 database models** in `backend/database/models.py` — previously written as "15+".
+
+### Known gap: no tests, no CI
+
+This repository has **zero test files and no `.github/workflows`**. That is worth stating plainly
+in a project whose stated selling point is auditability under HIPAA: the compliance claims in this
+README are design intent, and nothing in the repository verifies them.
 
 ---
 
